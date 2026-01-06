@@ -1,0 +1,135 @@
+
+# CONFIG NETPLAN (IP STATIQUE)
+/etc/netplan/01-debian.yaml
+
+text
+network:
+  version: 2
+  renderer: networkd
+  ethernets:
+    enp0s3:
+      dhcp4: no
+      addresses:
+        - 192.168.1.10/24
+      gateway4: 192.168.1.1
+      nameservers:
+        addresses:
+          - 192.168.1.10
+          - 8.8.8.8
+          - 8.8.4.4
+# COMMANDES DE BASE
+
+bash
+apt update && apt upgrade -y
+apt install -y curl gnupg2 lsb-release net-tools dnsutils
+# DÉPÔT ET INSTALLATION KEA
+
+bash
+curl -s https://downloads.isc.org/isc-pkg-public.key | gpg --dearmor > /usr/share/keyrings/isc-archive-keyring.gpg
+curl -1sLf 'https://dl.cloudsmith.io/public/isc/kea-3-0/setup.deb.sh' | bash
+apt update
+apt install -y kea kea-dhcp4-server kea-ctrl-agent
+systemctl enable --now kea-dhcp4-server
+# CONFIG KEA DHCP
+/etc/kea/kea-dhcp4.conf
+
+json
+{
+  "Dhcp4": {
+    "interfaces-config": {
+      "interfaces": ["enp0s3"]
+    },
+    "lease-database": {
+      "type": "memfile",
+      "lfc-interval": 1800
+    },
+    "valid-lifetime": 4000,
+    "renew-timer": 1000,
+    "rebind-timer": 2000,
+    "subnet4": [
+      {
+        "subnet": "192.168.1.0/24",
+        "pools": [
+          { "pool": "192.168.1.100 - 192.168.1.200" }
+        ],
+        "option-data": [
+          { "name": "routers", "data": "192.168.1.1" },
+          { "name": "domain-name-servers", "data": "192.168.1.10" },
+          { "name": "domain-name", "data": "projet.local" }
+        ]
+      }
+    ]
+  }
+}
+# INSTALLATION BIND9
+
+bash
+apt install -y bind9 bind9-utils bind9-doc
+systemctl enable --now bind9
+# CONFIG BIND9 – named.conf.local
+/etc/bind/named.conf.local
+
+text
+zone "projet.local" {
+  type master;
+  file "/etc/bind/db.projet.local";
+};
+
+zone "1.168.192.in-addr.arpa" {
+  type master;
+  file "/etc/bind/db.192";
+};
+# ZONE DIRECTE
+/etc/bind/db.projet.local
+
+text
+$TTL 604800
+@ IN SOA ns1.projet.local. admin.projet.local. (
+  2       ; Serial
+  604800  ; Refresh
+  86400   ; Retry
+  2419200 ; Expire
+  604800 ) ; Negative Cache TTL
+@   IN NS ns1.projet.local.
+ns1 IN A 192.168.1.10
+pc1 IN A 192.168.1.100
+pc2 IN A 192.168.1.101
+# ZONE INVERSE
+/etc/bind/db.192
+
+text
+$TTL 604800
+@ IN SOA ns1.projet.local. admin.projet.local. (
+  2       ; Serial
+  604800  ; Refresh
+  86400   ; Retry
+  2419200 ; Expire
+  604800 ) ; Negative Cache TTL
+@    IN NS ns1.projet.local.
+10   IN PTR ns1.projet.local.
+100  IN PTR pc1.projet.local.
+101  IN PTR pc2.projet.local.
+# VÉRIFICATION BIND9
+
+bash
+named-checkconf
+named-checkzone projet.local /etc/bind/db.projet.local
+named-checkzone 1.168.192.in-addr.arpa /etc/bind/db.192
+systemctl restart bind9
+# INSTALLATION STORK
+
+bash
+curl -1sLf 'https://dl.cloudsmith.io/public/isc/stork/setup.deb.sh' | bash
+apt install -y postgresql stork-server stork-agent
+systemctl enable --now postgresql
+stork-tool db-init
+systemctl enable --now stork-server stork-agent
+# COMMANDES DE TEST
+
+bash
+ip a
+dig @192.168.1.10 ns1.projet.local
+dig -x 192.168.1.100 @192.168.1.10
+journalctl -u kea-dhcp4-server -f
+journalctl -u bind9 -f
+journalctl -u stork-server -f
